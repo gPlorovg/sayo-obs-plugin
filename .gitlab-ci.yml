@@ -1,0 +1,135 @@
+stages:
+  - test
+  - package
+  - publish
+
+default:
+  interruptible: true
+
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH'
+    - if: '$CI_COMMIT_TAG'
+
+variables:
+  GIT_SUBMODULE_STRATEGY: recursive
+  PLUGIN_PACKAGE_NAME: "sayo-obs-plugin"
+
+.linux-test:
+  image: ubuntu:22.04
+  before_script:
+    - apt-get update
+    - DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends software-properties-common ca-certificates gnupg git ninja-build pkg-config zip python3-pip build-essential protobuf-compiler libprotobuf-dev libgrpc++-dev protobuf-compiler-grpc libsamplerate0-dev libsimde-dev
+    - add-apt-repository -y ppa:obsproject/obs-studio
+    - apt-get update
+    - DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libobs-dev
+    - python3 -m pip install --no-cache-dir cmake
+    - cmake --version
+
+.linux-release:
+  image: ubuntu:22.04
+  before_script:
+    - apt-get update
+    - DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends build-essential ca-certificates git ninja-build pkg-config zip python3-pip protobuf-compiler libprotobuf-dev libgrpc++-dev protobuf-compiler-grpc libsamplerate0-dev libsimde-dev libjansson-dev libcurl4-openssl-dev libx11-dev libgl1-mesa-dev libgles2-mesa-dev libegl1-mesa-dev libxcb-randr0-dev libxcb-shm0-dev libxcb-xinerama0-dev libxcb-composite0-dev libxcomposite-dev libxinerama-dev libxrandr-dev libxss-dev libpulse-dev libpipewire-0.3-dev libudev-dev libv4l-dev libdrm-dev libva-dev libavcodec-dev libavdevice-dev libavfilter-dev libavformat-dev libavutil-dev libswresample-dev libswscale-dev python3 python3-dev swig libluajit-5.1-dev
+    - python3 -m pip install --no-cache-dir cmake
+    - cmake --version
+    - |
+      OBS_SOURCE_DIR="${CI_PROJECT_DIR}/.ci/obs-studio-${OBS_MAJOR}"
+      OBS_BUILD_DIR="${OBS_SOURCE_DIR}/build_x86_64"
+
+      git clone --filter=blob:none https://github.com/obsproject/obs-studio.git "${OBS_SOURCE_DIR}"
+      git -C "${OBS_SOURCE_DIR}" fetch --tags --force
+
+      OBS_TAG="$(git -C "${OBS_SOURCE_DIR}" tag --list "${OBS_MAJOR}.*" --sort=-v:refname | head -n 1)"
+      if [ -z "${OBS_TAG}" ]; then
+        echo "Could not find OBS tag for major ${OBS_MAJOR}"
+        exit 1
+      fi
+
+      echo "Building libobs against OBS tag: ${OBS_TAG}"
+      git -C "${OBS_SOURCE_DIR}" checkout --force "${OBS_TAG}"
+      git -C "${OBS_SOURCE_DIR}" submodule update --init --recursive --depth 1
+
+      cmake -S "${OBS_SOURCE_DIR}" -B "${OBS_BUILD_DIR}" -G Ninja \
+        -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+        -DENABLE_BROWSER=OFF \
+        -DENABLE_PLUGINS=OFF \
+        -DENABLE_VST=OFF \
+        -DENABLE_SCRIPTING=OFF \
+        -DENABLE_UI=OFF
+      cmake --build "${OBS_BUILD_DIR}" --target libobs
+
+      export OBS_SOURCE_DIR
+      export OBS_BUILD_DIR
+
+test:linux:
+  extends: .linux-test
+  stage: test
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH'
+    - if: '$CI_COMMIT_TAG'
+  script:
+    - cmake --preset ubuntu-x86_64
+    - cmake --build --preset ubuntu-x86_64
+
+package:linux:
+  extends: .linux-release
+  stage: package
+  parallel:
+    matrix:
+      - OBS_MAJOR:
+          - "32"
+          - "31"
+  needs:
+    - job: test:linux
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - if: '$CI_COMMIT_TAG'
+  script:
+    - cmake --preset ubuntu-x86_64 -DCMAKE_PREFIX_PATH="${OBS_BUILD_DIR};${OBS_BUILD_DIR}/libobs" -DCMAKE_MODULE_PATH="${OBS_SOURCE_DIR}/cmake/finders"
+    - cmake --build --preset ubuntu-x86_64
+    - |
+      if [ -n "${CI_COMMIT_TAG:-}" ]; then
+        PACKAGE_VERSION="${CI_COMMIT_TAG#v}"
+      else
+        PACKAGE_VERSION="0.1.${CI_PIPELINE_IID}-${CI_COMMIT_SHORT_SHA}"
+      fi
+      PACKAGE_FILE="${PLUGIN_PACKAGE_NAME}-linux-x86_64-obs${OBS_MAJOR}-${PACKAGE_VERSION}.zip"
+
+      mkdir -p "package/${PLUGIN_PACKAGE_NAME}/bin/64bit" dist
+      cp build_x86_64/sayo_obs_plugin.so "package/${PLUGIN_PACKAGE_NAME}/bin/64bit/"
+      cp README.md README_ru.md "package/${PLUGIN_PACKAGE_NAME}/"
+
+      (cd package && zip -r "../dist/${PACKAGE_FILE}" "${PLUGIN_PACKAGE_NAME}")
+  artifacts:
+    name: "$PLUGIN_PACKAGE_NAME-linux-x86_64-obs$OBS_MAJOR-$CI_COMMIT_REF_SLUG"
+    expire_in: 30 days
+    paths:
+      - dist/*.zip
+
+publish:linux:
+  stage: publish
+  image: curlimages/curl:latest
+  parallel:
+    matrix:
+      - OBS_MAJOR:
+          - "32"
+          - "31"
+  needs:
+    - job: package:linux
+      artifacts: true
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - if: '$CI_COMMIT_TAG'
+  script:
+    - |
+      if [ -n "${CI_COMMIT_TAG:-}" ]; then
+        PACKAGE_VERSION="${CI_COMMIT_TAG#v}"
+      else
+        PACKAGE_VERSION="0.1.${CI_PIPELINE_IID}-${CI_COMMIT_SHORT_SHA}"
+      fi
+      PACKAGE_FILE="${PLUGIN_PACKAGE_NAME}-linux-x86_64-obs${OBS_MAJOR}-${PACKAGE_VERSION}.zip"
+    - 'echo "Publishing ${PACKAGE_FILE} as Generic Package version ${PACKAGE_VERSION}"'
+    - 'curl --fail --header "JOB-TOKEN: ${CI_JOB_TOKEN}" --upload-file "dist/${PACKAGE_FILE}" "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/${PLUGIN_PACKAGE_NAME}/${PACKAGE_VERSION}/${PACKAGE_FILE}"'
