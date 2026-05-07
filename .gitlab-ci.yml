@@ -1,0 +1,119 @@
+stages:
+  - test
+  - package
+  - publish
+
+default:
+  interruptible: true
+
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH'
+    - if: '$CI_COMMIT_TAG'
+
+variables:
+  GIT_SUBMODULE_STRATEGY: recursive
+  PLUGIN_PACKAGE_NAME: "sayo-obs-plugin"
+
+.linux-test:
+  image: ubuntu:22.04
+  before_script:
+    - apt-get update
+    - DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends software-properties-common ca-certificates gnupg git ninja-build pkg-config zip python3-pip build-essential protobuf-compiler libprotobuf-dev libgrpc++-dev protobuf-compiler-grpc libsamplerate0-dev libsimde-dev
+    - add-apt-repository -y ppa:obsproject/obs-studio
+    - apt-get update
+    - DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libobs-dev
+    - python3 -m pip install --no-cache-dir cmake
+    - cmake --version
+
+.linux-release:
+  # Matches GitHub release and official obs-plugintemplate Linux CI environment.
+  image: ubuntu:24.04
+  before_script:
+    - apt-get update
+    - DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates gnupg software-properties-common
+    - add-apt-repository -y ppa:obsproject/obs-studio
+    - apt-get update
+    - DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends build-essential ca-certificates cmake extra-cmake-modules git ninja-build pkg-config zip protobuf-compiler libprotobuf-dev libgrpc++-dev protobuf-compiler-grpc libsamplerate0-dev libsimde-dev libobs-dev libglib2.0-dev libjansson-dev libcurl4-openssl-dev libx11-dev libgl1-mesa-dev libgles2-mesa-dev libegl1-mesa-dev libxcb-randr0-dev libxcb-shm0-dev libxcb-xinerama0-dev libxcb-composite0-dev libxcomposite-dev libxinerama-dev libxrandr-dev libxss-dev libxcb1-dev libx11-xcb-dev libxcb-xfixes0-dev libwayland-dev libxkbcommon-dev libglvnd-dev libpci-dev uthash-dev libmbedtls-dev libx264-dev libcmocka-dev libatk1.0-dev libatk-bridge2.0-dev libxdamage-dev libasound2-dev libfontconfig-dev libfreetype6-dev libjack-jackd2-dev libsndio-dev libspeexdsp-dev libvlc-dev nlohmann-json3-dev libwebsocketpp-dev libasio-dev libqrcodegencpp-dev librist-dev libsrt-openssl-dev libvpl-dev libvpl2 libpulse-dev libpipewire-0.3-dev libudev-dev libv4l-dev libdrm-dev libva-dev libavcodec-dev libavdevice-dev libavfilter-dev libavformat-dev libavutil-dev libswresample-dev libswscale-dev python3 python3-dev swig libluajit-5.1-dev
+    - cmake --version
+    - pkg-config --modversion libavformat
+    - pkg-config --atleast-version=6.1 libavformat
+
+test:linux:
+  extends: .linux-test
+  stage: test
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH'
+    - if: '$CI_COMMIT_TAG'
+  script:
+    - cmake --preset ubuntu-x86_64
+    - cmake --build --preset ubuntu-x86_64
+
+package:linux:
+  extends: .linux-release
+  stage: package
+  needs:
+    - job: test:linux
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - if: '$CI_COMMIT_TAG'
+  script:
+    - cmake --preset ubuntu-x86_64 -DCMAKE_BUILD_TYPE=Release
+    - cmake --build --preset ubuntu-x86_64
+    - |
+      if [ -n "${CI_COMMIT_TAG:-}" ]; then
+        PACKAGE_VERSION="${CI_COMMIT_TAG#v}"
+      else
+        PACKAGE_VERSION="0.1.${CI_PIPELINE_IID}-${CI_COMMIT_SHORT_SHA}"
+      fi
+      OBS_VERSION="$(dpkg-query -W -f='${Version}' libobs-dev | cut -d: -f2)"
+      OBS_MAJOR="${OBS_VERSION%%.*}"
+      PACKAGE_FILE="${PLUGIN_PACKAGE_NAME}-linux-x86_64-obs${OBS_MAJOR}-${PACKAGE_VERSION}.zip"
+
+      mkdir -p "package/${PLUGIN_PACKAGE_NAME}/bin/64bit" dist
+      cp build_x86_64/sayo_obs_plugin.so "package/${PLUGIN_PACKAGE_NAME}/bin/64bit/"
+      cp README.md README_ru.md "package/${PLUGIN_PACKAGE_NAME}/"
+      ldd "package/${PLUGIN_PACKAGE_NAME}/bin/64bit/sayo_obs_plugin.so"
+      if ldd "package/${PLUGIN_PACKAGE_NAME}/bin/64bit/sayo_obs_plugin.so" | grep -q "not found"; then
+        echo "Missing runtime dependency in packaged plugin"
+        exit 1
+      fi
+
+      (cd package && zip -r "../dist/${PACKAGE_FILE}" "${PLUGIN_PACKAGE_NAME}")
+  artifacts:
+    name: "$PLUGIN_PACKAGE_NAME-linux-x86_64-$CI_COMMIT_REF_SLUG"
+    expire_in: 30 days
+    paths:
+      - dist/*.zip
+
+publish:linux:
+  stage: publish
+  image: curlimages/curl:latest
+  needs:
+    - job: package:linux
+      artifacts: true
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - if: '$CI_COMMIT_TAG'
+  script:
+    - |
+      if [ -n "${CI_COMMIT_TAG:-}" ]; then
+        PACKAGE_VERSION="${CI_COMMIT_TAG#v}"
+      else
+        PACKAGE_VERSION="0.1.${CI_PIPELINE_IID}-${CI_COMMIT_SHORT_SHA}"
+      fi
+      PACKAGE_FILE=""
+      for candidate in dist/${PLUGIN_PACKAGE_NAME}-linux-x86_64-obs*-${PACKAGE_VERSION}.zip; do
+        if [ -f "${candidate}" ]; then
+          PACKAGE_FILE="${candidate##*/}"
+          break
+        fi
+      done
+      if [ -z "${PACKAGE_FILE}" ]; then
+        echo "Package file not found"
+        exit 1
+      fi
+    - 'echo "Publishing ${PACKAGE_FILE} as Generic Package version ${PACKAGE_VERSION}"'
+    - 'curl --fail --header "JOB-TOKEN: ${CI_JOB_TOKEN}" --upload-file "dist/${PACKAGE_FILE}" "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/${PLUGIN_PACKAGE_NAME}/${PACKAGE_VERSION}/${PACKAGE_FILE}"'
