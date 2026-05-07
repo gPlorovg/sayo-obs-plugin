@@ -1,0 +1,132 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  release-linux:
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        obs-major: ["32", "31"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate tag is on master
+        run: |
+          git fetch origin master
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/master; then
+            echo "Tag ${GITHUB_REF_NAME} must point to a commit that is on master."
+            exit 1
+          fi
+
+      - name: Install CMake 3.28+
+        run: |
+          python3 -m pip install --user --no-cache-dir cmake
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential ca-certificates git ninja-build pkg-config zip \
+            protobuf-compiler libprotobuf-dev \
+            libgrpc++-dev protobuf-compiler-grpc \
+            libsamplerate0-dev libsimde-dev \
+            libjansson-dev libcurl4-openssl-dev \
+            libx11-dev libgl1-mesa-dev libgles2-mesa-dev libegl1-mesa-dev \
+            libxcb-randr0-dev libxcb-shm0-dev libxcb-xinerama0-dev libxcb-composite0-dev \
+            libxcomposite-dev libxinerama-dev libxrandr-dev libxss-dev \
+            libpulse-dev libpipewire-0.3-dev libudev-dev libv4l-dev \
+            libdrm-dev libva-dev \
+            libavcodec-dev libavdevice-dev libavfilter-dev libavformat-dev \
+            libavutil-dev libswresample-dev libswscale-dev \
+            python3 python3-dev swig libluajit-5.1-dev
+
+      - name: Build OBS Studio libobs
+        run: |
+          obs_source_dir="${GITHUB_WORKSPACE}/.ci/obs-studio-${{ matrix.obs-major }}"
+          obs_build_dir="${obs_source_dir}/build_x86_64"
+
+          git clone --filter=blob:none https://github.com/obsproject/obs-studio.git "${obs_source_dir}"
+          git -C "${obs_source_dir}" fetch --tags --force
+
+          obs_tag="$(git -C "${obs_source_dir}" tag --list "${{ matrix.obs-major }}.*" --sort=-v:refname | head -n 1)"
+          if [ -z "${obs_tag}" ]; then
+            echo "Could not find OBS tag for major ${{ matrix.obs-major }}"
+            exit 1
+          fi
+
+          echo "Building libobs against OBS tag: ${obs_tag}"
+          git -C "${obs_source_dir}" checkout --force "${obs_tag}"
+          git -C "${obs_source_dir}" submodule update --init --recursive --depth 1
+
+          cmake -S "${obs_source_dir}" -B "${obs_build_dir}" -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DENABLE_BROWSER=OFF \
+            -DENABLE_PLUGINS=OFF \
+            -DENABLE_VST=OFF \
+            -DENABLE_SCRIPTING=OFF \
+            -DENABLE_UI=OFF
+          cmake --build "${obs_build_dir}" --target libobs
+
+          {
+            echo "OBS_SOURCE_DIR=${obs_source_dir}"
+            echo "OBS_BUILD_DIR=${obs_build_dir}"
+            echo "OBS_TAG=${obs_tag}"
+          } >> "$GITHUB_ENV"
+
+      - name: Configure + Build
+        run: |
+          cmake --preset ubuntu-x86_64 \
+            -DCMAKE_PREFIX_PATH="${OBS_BUILD_DIR};${OBS_BUILD_DIR}/libobs" \
+            -DCMAKE_MODULE_PATH="${OBS_SOURCE_DIR}/cmake/finders"
+          cmake --build --preset ubuntu-x86_64
+
+      - name: Package
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          package_file="sayo-obs-plugin-linux-x86_64-obs${{ matrix.obs-major }}-${version}.zip"
+
+          mkdir -p "package/sayo-obs-plugin/bin/64bit"
+          mkdir -p dist
+          cp build_x86_64/sayo_obs_plugin.so "package/sayo-obs-plugin/bin/64bit/"
+          cp README.md README_ru.md "package/sayo-obs-plugin/"
+
+          (cd package && zip -r "../dist/${package_file}" sayo-obs-plugin)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-linux-obs${{ matrix.obs-major }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    needs: [release-linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate tag is on master
+        run: |
+          git fetch origin master
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/master; then
+            echo "Tag ${GITHUB_REF_NAME} must point to a commit that is on master."
+            exit 1
+          fi
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release-artifacts/**/*.zip
