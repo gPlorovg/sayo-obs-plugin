@@ -1,0 +1,47 @@
+# CMake / out-of-tree builds (see CMakePresets.json)
+build_x64/
+build_x86_64/
+build/
+out/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+install_manifest*.txt
+CTestTestfile.cmake
+_deps/
+
+# Local CMake user presets (machine-specific paths)
+CMakeUserPresets.json
+
+# Visual Studio / MSVC
+.vs/
+*.user
+*.suo
+*.sdf
+*.opensdf
+*.VC.db
+*.VC.opendb
+ipch/
+
+# Ninja
+.ninja_deps
+.ninja_log
+rules.ninja
+
+# Compiled / link outputs (if built in-tree by mistake)
+*.obj
+*.o
+*.a
+*.lib
+*.dll
+*.exp
+*.pdb
+*.ilk
+*.so
+*.dylib
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
