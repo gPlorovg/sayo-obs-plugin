@@ -23,6 +23,10 @@
 #include "settings_model.h"
 #include "subtitle_buffer.h"
 
+#ifndef OBS_TEXT_INFO
+#define OBS_TEXT_INFO OBS_TEXT_DEFAULT
+#endif
+
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE(PLUGIN_NAME, "en-US")
 
@@ -109,7 +113,7 @@ static std::string now_stamp_for_log()
 #ifdef _WIN32
 	localtime_s(&tm, &t);
 #else
-	localtime_r(&tm, &t);
+	localtime_r(&t, &tm);
 #endif
 	std::ostringstream oss;
 	oss << std::put_time(&tm, "%Y-%m-%d %H:%M:%S");
@@ -121,7 +125,7 @@ static std::string obs_data_to_json_with_defaults_or_empty(obs_data_t *data)
 	if (!data) {
 		return {};
 	}
-	const char *json = obs_data_get_json_with_defaults(data);
+	const char *json = obs_data_get_json(data);
 	return json ? std::string(json) : std::string{};
 }
 
