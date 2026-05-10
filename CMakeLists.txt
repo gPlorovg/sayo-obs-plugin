@@ -5,6 +5,7 @@ project(sayo-obs-plugin VERSION 0.1.0 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 if(WIN32 AND MSVC)
   set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
@@ -74,6 +75,7 @@ add_custom_command(
 )
 
 add_library(sayo_proto STATIC ${PROTO_SRCS} ${PROTO_HDRS})
+set_target_properties(sayo_proto PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(sayo_proto PUBLIC "${GENERATED_DIR}")
 if(SAYO_GRPC_INCLUDE_DIR)
   target_include_directories(sayo_proto PUBLIC "${SAYO_GRPC_INCLUDE_DIR}")
