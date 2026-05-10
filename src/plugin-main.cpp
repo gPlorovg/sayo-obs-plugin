@@ -109,7 +109,7 @@ static std::string now_stamp_for_log()
 #ifdef _WIN32
 	localtime_s(&tm, &t);
 #else
-	localtime_r(&tm, &t);
+	localtime_r(&t, &tm);
 #endif
 	std::ostringstream oss;
 	oss << std::put_time(&tm, "%Y-%m-%d %H:%M:%S");
@@ -121,8 +121,35 @@ static std::string obs_data_to_json_with_defaults_or_empty(obs_data_t *data)
 	if (!data) {
 		return {};
 	}
+#ifdef _WIN32
 	const char *json = obs_data_get_json_with_defaults(data);
+#else
+	const char *json = obs_data_get_json(data);
+#endif
 	return json ? std::string(json) : std::string{};
+}
+
+static bool noop_info_button(obs_properties_t *, obs_property_t *, void *)
+{
+	return true;
+}
+
+static void add_info_text(obs_properties_t *props, const char *name, const char *text, bool fallback_as_button = false)
+{
+#ifdef OBS_TEXT_INFO
+	obs_properties_add_text(props, name, text, OBS_TEXT_INFO);
+#else
+	if (fallback_as_button) {
+		obs_property_t *prop = obs_properties_add_button(props, name, text, noop_info_button);
+		if (prop) {
+			obs_property_set_enabled(prop, false);
+		}
+	} else {
+		(void)props;
+		(void)name;
+		(void)text;
+	}
+#endif
 }
 
 static void obs_data_copy_item_with_defaults(obs_data_t *dst, obs_data_item_t *item)
@@ -829,21 +856,8 @@ static bool on_disconnect_clicked(obs_properties_t *, obs_property_t *, void *da
 		ctx->settings.language_code.clear();
 	}
 
-	/* Clear persisted selection so the UI resets too */
-	if (ctx->source) {
-		obs_data_t *s = obs_source_get_settings(ctx->source);
-		if (s) {
-			obs_data_set_string(s, "model_id", "");
-			obs_data_set_string(s, "language_code", "");
-			obs_source_update(ctx->source, s);
-			obs_data_release(s);
-		}
-	}
-
+	ctx->available_models.clear();
 	ctx->connect_status = "Disconnected (HealthCheck required)";
-	if (ctx->source) {
-		obs_source_update_properties(ctx->source);
-	}
 	return true;
 }
 
@@ -941,8 +955,8 @@ static obs_properties_t *asr_get_properties(void *data)
 	obs_properties_add_int(props, "server_port", "Server port", 1, 65535, 1);
 	obs_properties_add_button(props, "connect_button", "HealthCheck", on_connect_clicked);
 	obs_properties_add_button(props, "disconnect_button", "Disconnect", on_disconnect_clicked);
-	obs_properties_add_text(
-		props, "connection_status", ("Connection: " + ctx->connect_status).c_str(), OBS_TEXT_INFO);
+	const std::string connection_status = "Connection: " + ctx->connect_status;
+	add_info_text(props, "connection_status", connection_status.c_str(), true);
 
 	obs_property_t *model_list = obs_properties_add_list(
 		props, "model_id", "Model", OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
@@ -993,10 +1007,9 @@ static obs_properties_t *asr_get_properties(void *data)
 	if (subtitle_log)
 		obs_property_set_modified_callback2(subtitle_log, preview_cb, ctx);
 
-	obs_properties_add_text(
+	add_info_text(
 		props, "subtitle_appearance_note",
-		"Text acts as a placeholder until the first non-empty ASR result. After that, incoming ASR text is used.",
-		OBS_TEXT_INFO);
+		"Text acts as a placeholder until the first non-empty ASR result. After that, incoming ASR text is used.");
 
 	if (ctx->internal_text_source) {
 		obs_properties_t *text_props = obs_source_properties(ctx->internal_text_source);
