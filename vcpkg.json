@@ -1,0 +1,12 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg/master/scripts/vcpkg.schema.json",
+  "name": "sayo-obs-plugin",
+  "version": "0.1.0",
+  "description": "OBS plugin streaming audio to Sayo ASR via gRPC",
+  "dependencies": [
+    "grpc",
+    "protobuf",
+    "libsamplerate",
+    "simde"
+  ]
+}
