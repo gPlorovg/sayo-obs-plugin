@@ -6,12 +6,8 @@ on:
 
 jobs:
   release-linux:
-    # OBS 31/32 expects newer FFmpeg than Ubuntu 22.04 ships (needs >= 6.1).
+    # Matches the official obs-plugintemplate Linux CI environment.
     runs-on: ubuntu-24.04
-    strategy:
-      fail-fast: false
-      matrix:
-        obs-major: ["32", "31"]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -35,11 +31,6 @@ jobs:
             exit 1
           fi
 
-      - name: Install CMake 3.28+
-        run: |
-          python3 -m pip install --user --no-cache-dir cmake
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -48,82 +39,65 @@ jobs:
           sudo add-apt-repository -y ppa:obsproject/obs-studio
           sudo apt-get update
           sudo apt-get install -y \
-            build-essential ca-certificates extra-cmake-modules git ninja-build pkg-config zip \
+            build-essential ca-certificates cmake extra-cmake-modules git ninja-build pkg-config zip \
             protobuf-compiler libprotobuf-dev \
             libgrpc++-dev protobuf-compiler-grpc \
             libsamplerate0-dev libsimde-dev \
-            libjansson-dev libcurl4-openssl-dev \
+            libobs-dev \
+            libglib2.0-dev libjansson-dev libcurl4-openssl-dev \
             libx11-dev libgl1-mesa-dev libgles2-mesa-dev libegl1-mesa-dev \
             libxcb-randr0-dev libxcb-shm0-dev libxcb-xinerama0-dev libxcb-composite0-dev \
             libxcomposite-dev libxinerama-dev libxrandr-dev libxss-dev \
             libxcb1-dev libx11-xcb-dev libxcb-xfixes0-dev \
-            libwayland-dev libglvnd-dev libpci-dev \
-            uthash-dev libmbedtls-dev \
+            libwayland-dev libxkbcommon-dev libglvnd-dev libpci-dev \
+            uthash-dev libmbedtls-dev libx264-dev libcmocka-dev \
+            libatk1.0-dev libatk-bridge2.0-dev libxdamage-dev \
+            libasound2-dev libfontconfig-dev libfreetype6-dev libjack-jackd2-dev \
+            libsndio-dev libspeexdsp-dev libvlc-dev \
+            nlohmann-json3-dev libwebsocketpp-dev libasio-dev libqrcodegencpp-dev \
+            librist-dev libsrt-openssl-dev libvpl-dev libvpl2 \
             libpulse-dev libpipewire-0.3-dev libudev-dev libv4l-dev \
             libdrm-dev libva-dev \
             libavcodec-dev libavdevice-dev libavfilter-dev libavformat-dev \
             libavutil-dev libswresample-dev libswscale-dev \
             python3 python3-dev swig libluajit-5.1-dev
-      - name: Verify FFmpeg dev version
+      - name: Show tool versions
         run: |
+          cmake --version
+          protoc --version
           pkg-config --modversion libavformat
           pkg-config --atleast-version=6.1 libavformat
-
-      - name: Build OBS Studio libobs
-        run: |
-          obs_source_dir="${GITHUB_WORKSPACE}/.ci/obs-studio-${{ matrix.obs-major }}"
-          obs_build_dir="${obs_source_dir}/build_x86_64"
-
-          git clone --filter=blob:none https://github.com/obsproject/obs-studio.git "${obs_source_dir}"
-          git -C "${obs_source_dir}" fetch --tags --force
-
-          obs_tag="$(git -C "${obs_source_dir}" tag --list "${{ matrix.obs-major }}.*" --sort=-v:refname | head -n 1)"
-          if [ -z "${obs_tag}" ]; then
-            echo "Could not find OBS tag for major ${{ matrix.obs-major }}"
-            exit 1
-          fi
-
-          echo "Building libobs against OBS tag: ${obs_tag}"
-          git -C "${obs_source_dir}" checkout --force "${obs_tag}"
-          git -C "${obs_source_dir}" submodule update --init --recursive --depth 1
-
-          cmake -S "${obs_source_dir}" -B "${obs_build_dir}" -G Ninja \
-            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-            -DENABLE_BROWSER=OFF \
-            -DENABLE_PLUGINS=OFF \
-            -DENABLE_VST=OFF \
-            -DENABLE_SCRIPTING=OFF \
-            -DENABLE_UI=OFF
-          cmake --build "${obs_build_dir}" --target libobs
-
-          {
-            echo "OBS_SOURCE_DIR=${obs_source_dir}"
-            echo "OBS_BUILD_DIR=${obs_build_dir}"
-            echo "OBS_TAG=${obs_tag}"
-          } >> "$GITHUB_ENV"
+          dpkg-query -W -f='libobs-dev ${Version}\n' libobs-dev
 
       - name: Configure + Build
         run: |
           cmake --preset ubuntu-x86_64 \
-            -DCMAKE_PREFIX_PATH="${OBS_BUILD_DIR};${OBS_BUILD_DIR}/libobs" \
-            -DCMAKE_MODULE_PATH="${OBS_SOURCE_DIR}/cmake/finders"
+            -DCMAKE_BUILD_TYPE=Release
           cmake --build --preset ubuntu-x86_64
 
       - name: Package
         run: |
           version="${GITHUB_REF_NAME#v}"
-          package_file="sayo-obs-plugin-linux-x86_64-obs${{ matrix.obs-major }}-${version}.zip"
+          obs_version="$(dpkg-query -W -f='${Version}' libobs-dev | cut -d: -f2)"
+          obs_major="${obs_version%%.*}"
+          package_file="sayo-obs-plugin-linux-x86_64-obs${obs_major}-${version}.zip"
 
           mkdir -p "package/sayo-obs-plugin/bin/64bit"
           mkdir -p dist
           cp build_x86_64/sayo_obs_plugin.so "package/sayo-obs-plugin/bin/64bit/"
           cp README.md README_ru.md "package/sayo-obs-plugin/"
 
+          ldd "package/sayo-obs-plugin/bin/64bit/sayo_obs_plugin.so"
+          if ldd "package/sayo-obs-plugin/bin/64bit/sayo_obs_plugin.so" | grep -q "not found"; then
+            echo "Missing runtime dependency in packaged plugin"
+            exit 1
+          fi
+
           (cd package && zip -r "../dist/${package_file}" sayo-obs-plugin)
 
       - uses: actions/upload-artifact@v4
         with:
-          name: release-linux-obs${{ matrix.obs-major }}
+          name: release-linux
           path: dist/*
           if-no-files-found: error
 

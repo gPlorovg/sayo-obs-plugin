@@ -6,20 +6,15 @@ on:
 
 jobs:
   test-linux:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install CMake 3.28+
-        run: |
-          python3 -m pip install --user --no-cache-dir cmake
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            software-properties-common ca-certificates gnupg \
+            software-properties-common ca-certificates cmake gnupg \
             build-essential ninja-build pkg-config zip \
             protobuf-compiler libprotobuf-dev \
             libgrpc++-dev protobuf-compiler-grpc \
@@ -33,6 +28,7 @@ jobs:
         run: |
           cmake --version
           protoc --version
+          dpkg-query -W -f='libobs-dev ${Version}\n' libobs-dev
 
       - name: Configure
         run: cmake --preset ubuntu-x86_64
