@@ -68,9 +68,15 @@ cmake --build --preset windows-x64
 
 ### Ubuntu / Debian (x86_64)
 
+Текущий CI следует Linux-окружению официального OBS plugin template:
+**Ubuntu 24.04** + OBS PPA + системные пакеты.
+
 Пакеты:
 
 ```bash
+sudo apt-get update
+sudo apt-get install -y software-properties-common ca-certificates gnupg
+sudo add-apt-repository -y ppa:obsproject/obs-studio
 sudo apt-get update
 sudo apt-get install -y \
   build-essential cmake ninja-build pkg-config \
@@ -87,6 +93,50 @@ cd sayo-obs-plugin
 cmake --preset ubuntu-x86_64   # или: ubuntu
 cmake --build --preset ubuntu-x86_64
 ```
+
+## GitHub CI / Release
+
+GitHub Actions сейчас настроены в первую очередь для Linux:
+
+- `CI` запускается только для pull request в `master`.
+- `Release` запускается только при push тега вида `v*`.
+- Release-тег должен указывать на commit, достижимый из `master` или `main`.
+- Linux release собирается на `ubuntu-24.04`, как в официальном OBS plugin template.
+- Плагин собирается против `libobs-dev` из OBS PPA. В имя zip добавляется определённая major-версия OBS, например `sayo-obs-plugin-linux-x86_64-obs32-0.1.0.zip`.
+
+Создать релиз:
+
+```powershell
+git checkout master
+git pull github master
+git tag v0.1.0
+git push github v0.1.0
+```
+
+Структура release-архива:
+
+```text
+sayo-obs-plugin/
+  bin/64bit/
+    sayo_obs_plugin.so
+  README.md
+  README_ru.md
+```
+
+Установка Linux release-архива:
+
+```bash
+mkdir -p ~/.config/obs-studio/plugins
+unzip sayo-obs-plugin-linux-x86_64-obs32-0.1.0.zip -d ~/.config/obs-studio/plugins
+```
+
+Ожидаемый путь плагина:
+
+```text
+~/.config/obs-studio/plugins/sayo-obs-plugin/bin/64bit/sayo_obs_plugin.so
+```
+
+Чтобы надёжно собирать под другую major-версию OBS, лучше подготовить отдельный OBS SDK / Docker image для этой версии и запускать release job в нём. Текущий GitHub release workflow специально использует актуальный `libobs-dev` из OBS PPA, а не собирает `obs-studio` из исходников внутри каждого release job.
 
 ## Установка в OBS (Windows)
 

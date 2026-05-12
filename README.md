@@ -68,9 +68,15 @@ Build artifacts land in `build_x64/RelWithDebInfo/` (Windows preset).
 
 ### Ubuntu / Debian (x86_64)
 
+CI currently follows the official OBS plugin template Linux environment:
+**Ubuntu 24.04** + OBS PPA + system packages.
+
 Packages:
 
 ```bash
+sudo apt-get update
+sudo apt-get install -y software-properties-common ca-certificates gnupg
+sudo add-apt-repository -y ppa:obsproject/obs-studio
 sudo apt-get update
 sudo apt-get install -y \
   build-essential cmake ninja-build pkg-config \
@@ -87,6 +93,50 @@ cd sayo-obs-plugin
 cmake --preset ubuntu-x86_64   # or: ubuntu
 cmake --build --preset ubuntu-x86_64
 ```
+
+## GitHub CI / Release
+
+GitHub Actions are configured for Linux first:
+
+- `CI` runs only for pull requests targeting `master`.
+- `Release` runs only when a tag matching `v*` is pushed.
+- Release tags must point to a commit reachable from `master` or `main`.
+- Linux release builds run on `ubuntu-24.04`, matching the official OBS plugin template environment.
+- The plugin is built against `libobs-dev` from the OBS PPA. The produced zip name includes the detected OBS major version, for example `sayo-obs-plugin-linux-x86_64-obs32-0.1.0.zip`.
+
+Create a release:
+
+```powershell
+git checkout master
+git pull github master
+git tag v0.1.0
+git push github v0.1.0
+```
+
+The release archive layout is:
+
+```text
+sayo-obs-plugin/
+  bin/64bit/
+    sayo_obs_plugin.so
+  README.md
+  README_ru.md
+```
+
+Install the Linux release archive:
+
+```bash
+mkdir -p ~/.config/obs-studio/plugins
+unzip sayo-obs-plugin-linux-x86_64-obs32-0.1.0.zip -d ~/.config/obs-studio/plugins
+```
+
+Expected plugin path:
+
+```text
+~/.config/obs-studio/plugins/sayo-obs-plugin/bin/64bit/sayo_obs_plugin.so
+```
+
+To build against another OBS major version reliably, prepare a dedicated OBS SDK / Docker image for that version and run the release job against it. The current GitHub release workflow intentionally uses the current `libobs-dev` from OBS PPA instead of building `obs-studio` from sources inside every release job.
 
 ## Deploy to OBS (Windows)
 
