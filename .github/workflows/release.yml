@@ -101,8 +101,130 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  release-windows:
+    runs-on: windows-2022
+    env:
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\vcpkg-cache
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate tag is on default branch
+        shell: pwsh
+        run: |
+          git fetch origin master main 2>$null
+          $ok = $false
+          foreach ($branch in @("master", "main")) {
+            git rev-parse --verify "origin/$branch" *> $null
+            if ($LASTEXITCODE -ne 0) {
+              continue
+            }
+
+            git merge-base --is-ancestor "$env:GITHUB_SHA" "origin/$branch"
+            if ($LASTEXITCODE -eq 0) {
+              $ok = $true
+              Write-Host "Tag $env:GITHUB_REF_NAME is reachable from origin/$branch"
+              break
+            }
+          }
+
+          if (-not $ok) {
+            throw "Tag $env:GITHUB_REF_NAME must point to a commit reachable from origin/master or origin/main."
+          }
+
+      - name: Cache vcpkg binaries
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
+          key: vcpkg-windows-${{ hashFiles('vcpkg.json') }}
+          restore-keys: vcpkg-windows-
+
+      - name: Bootstrap vcpkg
+        shell: pwsh
+        run: |
+          $vcpkgRoot = "$env:RUNNER_TEMP/vcpkg".Replace("\", "/")
+          git clone https://github.com/microsoft/vcpkg.git "$vcpkgRoot"
+          & "$vcpkgRoot/bootstrap-vcpkg.bat" -disableMetrics
+          New-Item -ItemType Directory -Force "$env:VCPKG_DEFAULT_BINARY_CACHE" | Out-Null
+          "VCPKG_ROOT=$vcpkgRoot" >> $env:GITHUB_ENV
+
+      - name: Build latest OBS Studio libobs
+        shell: pwsh
+        run: |
+          git clone --filter=blob:none https://github.com/obsproject/obs-studio.git C:/obs-studio
+          git -C C:/obs-studio fetch --tags --force
+
+          $obsTag = git -C C:/obs-studio tag --list "[0-9]*.[0-9]*.[0-9]*" --sort=-v:refname | Select-Object -First 1
+          if (-not $obsTag) {
+            throw "Could not find latest OBS release tag"
+          }
+
+          $obsMajor = ($obsTag -split "\.")[0]
+          Write-Host "Building libobs against OBS tag: $obsTag"
+          git -C C:/obs-studio checkout --force "$obsTag"
+          git -C C:/obs-studio submodule update --init --recursive --depth 1
+
+          cmake -S C:/obs-studio -B C:/obs-studio/build_x64 `
+            -G "Visual Studio 17 2022" -A x64 `
+            -DENABLE_BROWSER=OFF `
+            -DENABLE_PLUGINS=OFF `
+            -DENABLE_VST=OFF `
+            -DENABLE_SCRIPTING=OFF `
+            -DENABLE_UI=OFF
+          cmake --build C:/obs-studio/build_x64 --config RelWithDebInfo --target libobs
+
+          "OBS_STUDIO_DIR=C:/obs-studio" >> $env:GITHUB_ENV
+          "OBS_TAG=$obsTag" >> $env:GITHUB_ENV
+          "OBS_MAJOR=$obsMajor" >> $env:GITHUB_ENV
+
+      - name: Configure + Build
+        shell: pwsh
+        run: |
+          cmake --preset windows-x64
+          cmake --build --preset windows-x64
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME.TrimStart("v")
+          $packageFile = "sayo-obs-plugin-windows-x64-obs$env:OBS_MAJOR-$version.zip"
+          $packageDir = "package/sayo-obs-plugin/bin/64bit"
+
+          New-Item -ItemType Directory -Force $packageDir, "dist" | Out-Null
+
+          $buildDir = "build_x64/RelWithDebInfo"
+          $requiredFiles = @(
+            "sayo_obs_plugin.dll",
+            "abseil_dll.dll",
+            "cares.dll",
+            "libcrypto-3-x64.dll",
+            "libprotobuf.dll",
+            "libssl-3-x64.dll",
+            "re2.dll",
+            "samplerate.dll",
+            "z.dll"
+          )
+
+          foreach ($file in $requiredFiles) {
+            $src = Join-Path $buildDir $file
+            if (-not (Test-Path $src)) {
+              throw "Required runtime file is missing: $src"
+            }
+            Copy-Item -Force $src $packageDir
+          }
+
+          Copy-Item -Force README.md, README_ru.md "package/sayo-obs-plugin/"
+          Compress-Archive -Force -Path "package/sayo-obs-plugin" -DestinationPath "dist/$packageFile"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-windows
+          path: dist/*
+          if-no-files-found: error
+
   publish:
-    needs: [release-linux]
+    needs: [release-linux, release-windows]
     runs-on: ubuntu-latest
     permissions:
       contents: write

@@ -35,3 +35,59 @@ jobs:
 
       - name: Build
         run: cmake --build --preset ubuntu-x86_64
+
+  test-windows:
+    runs-on: windows-2022
+    env:
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\vcpkg-cache
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache vcpkg binaries
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
+          key: vcpkg-windows-${{ hashFiles('vcpkg.json') }}
+          restore-keys: vcpkg-windows-
+
+      - name: Bootstrap vcpkg
+        shell: pwsh
+        run: |
+          $vcpkgRoot = "$env:RUNNER_TEMP/vcpkg".Replace("\", "/")
+          git clone https://github.com/microsoft/vcpkg.git "$vcpkgRoot"
+          & "$vcpkgRoot/bootstrap-vcpkg.bat" -disableMetrics
+          New-Item -ItemType Directory -Force "$env:VCPKG_DEFAULT_BINARY_CACHE" | Out-Null
+          "VCPKG_ROOT=$vcpkgRoot" >> $env:GITHUB_ENV
+
+      - name: Build latest OBS Studio libobs
+        shell: pwsh
+        run: |
+          git clone --filter=blob:none https://github.com/obsproject/obs-studio.git C:/obs-studio
+          git -C C:/obs-studio fetch --tags --force
+
+          $obsTag = git -C C:/obs-studio tag --list "[0-9]*.[0-9]*.[0-9]*" --sort=-v:refname | Select-Object -First 1
+          if (-not $obsTag) {
+            throw "Could not find latest OBS release tag"
+          }
+
+          Write-Host "Building libobs against OBS tag: $obsTag"
+          git -C C:/obs-studio checkout --force "$obsTag"
+          git -C C:/obs-studio submodule update --init --recursive --depth 1
+
+          cmake -S C:/obs-studio -B C:/obs-studio/build_x64 `
+            -G "Visual Studio 17 2022" -A x64 `
+            -DENABLE_BROWSER=OFF `
+            -DENABLE_PLUGINS=OFF `
+            -DENABLE_VST=OFF `
+            -DENABLE_SCRIPTING=OFF `
+            -DENABLE_UI=OFF
+          cmake --build C:/obs-studio/build_x64 --config RelWithDebInfo --target libobs
+          "OBS_STUDIO_DIR=C:/obs-studio" >> $env:GITHUB_ENV
+
+      - name: Configure
+        shell: pwsh
+        run: cmake --preset windows-x64
+
+      - name: Build
+        shell: pwsh
+        run: cmake --build --preset windows-x64
