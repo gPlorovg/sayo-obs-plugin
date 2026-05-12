@@ -1,0 +1,59 @@
+{
+  "version": 8,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 28,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "windows-x64",
+      "displayName": "Windows x64 (vcpkg + system OBS path)",
+      "description": "Configures with vcpkg toolchain. Set OBS_STUDIO_DIR env var to your obs-studio source root before running.",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      },
+      "generator": "Visual Studio 17 2022",
+      "architecture": "x64,version=10.0.22621",
+      "binaryDir": "${sourceDir}/build_x64",
+      "toolchainFile": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+      "cacheVariables": {
+        "VCPKG_OVERLAY_TRIPLETS": "${sourceDir}/cmake/vcpkg/triplets",
+        "VCPKG_TARGET_TRIPLET": "x64-windows-novec",
+        "CMAKE_PREFIX_PATH": "$env{OBS_STUDIO_DIR}/build_x64;$env{OBS_STUDIO_DIR}/build_x64/libobs;$env{OBS_STUDIO_DIR}/build_x64/deps/w32-pthreads",
+        "CMAKE_MODULE_PATH": "$env{OBS_STUDIO_DIR}/cmake/finders",
+        "CMAKE_MAP_IMPORTED_CONFIG_RELEASE": "RelWithDebInfo;Release;",
+        "CMAKE_MAP_IMPORTED_CONFIG_DEBUG": "Debug;RelWithDebInfo;Release;"
+      }
+    },
+    {
+      "name": "ubuntu-x86_64",
+      "displayName": "Ubuntu x86_64",
+      "description": "Linux x86_64: system packages (apt) for libobs, gRPC, protobuf, libsamplerate, simde. See docs/BUILD.md §5.",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      },
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build_x86_64",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "windows-x64",
+      "configurePreset": "windows-x64",
+      "configuration": "RelWithDebInfo"
+    },
+    {
+      "name": "ubuntu-x86_64",
+      "configurePreset": "ubuntu-x86_64",
+      "configuration": "RelWithDebInfo"
+    }
+  ]
+}

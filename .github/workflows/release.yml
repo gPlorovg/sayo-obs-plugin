@@ -1,0 +1,139 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  release-linux:
+    # Matches the official obs-plugintemplate Linux CI environment.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate tag is on default branch
+        run: |
+          git fetch origin master main 2>/dev/null || true
+          ok=false
+          for b in master main; do
+            if git rev-parse --verify "origin/$b" >/dev/null 2>&1; then
+              if git merge-base --is-ancestor "$GITHUB_SHA" "origin/$b"; then
+                ok=true
+                echo "Tag ${GITHUB_REF_NAME} is reachable from origin/$b"
+                break
+              fi
+            fi
+          done
+          if [ "$ok" != "true" ]; then
+            echo "Tag ${GITHUB_REF_NAME} must point to a commit reachable from origin/master or origin/main."
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            ca-certificates gnupg software-properties-common
+          sudo add-apt-repository -y ppa:obsproject/obs-studio
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential ca-certificates cmake extra-cmake-modules git ninja-build pkg-config zip \
+            protobuf-compiler libprotobuf-dev \
+            libgrpc++-dev protobuf-compiler-grpc \
+            libsamplerate0-dev libsimde-dev \
+            libobs-dev \
+            libglib2.0-dev libjansson-dev libcurl4-openssl-dev \
+            libx11-dev libgl1-mesa-dev libgles2-mesa-dev libegl1-mesa-dev \
+            libxcb-randr0-dev libxcb-shm0-dev libxcb-xinerama0-dev libxcb-composite0-dev \
+            libxcomposite-dev libxinerama-dev libxrandr-dev libxss-dev \
+            libxcb1-dev libx11-xcb-dev libxcb-xfixes0-dev \
+            libwayland-dev libxkbcommon-dev libglvnd-dev libpci-dev \
+            uthash-dev libmbedtls-dev libx264-dev libcmocka-dev \
+            libatk1.0-dev libatk-bridge2.0-dev libxdamage-dev \
+            libasound2-dev libfontconfig-dev libfreetype6-dev libjack-jackd2-dev \
+            libsndio-dev libspeexdsp-dev libvlc-dev \
+            nlohmann-json3-dev libwebsocketpp-dev libasio-dev libqrcodegencpp-dev \
+            librist-dev libsrt-openssl-dev libvpl-dev libvpl2 \
+            libpulse-dev libpipewire-0.3-dev libudev-dev libv4l-dev \
+            libdrm-dev libva-dev \
+            libavcodec-dev libavdevice-dev libavfilter-dev libavformat-dev \
+            libavutil-dev libswresample-dev libswscale-dev \
+            python3 python3-dev swig libluajit-5.1-dev
+      - name: Show tool versions
+        run: |
+          cmake --version
+          protoc --version
+          pkg-config --modversion libavformat
+          pkg-config --atleast-version=6.1 libavformat
+          dpkg-query -W -f='libobs-dev ${Version}\n' libobs-dev
+
+      - name: Configure + Build
+        run: |
+          cmake --preset ubuntu-x86_64 \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build --preset ubuntu-x86_64
+
+      - name: Package
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          obs_version="$(dpkg-query -W -f='${Version}' libobs-dev | cut -d: -f2)"
+          obs_major="${obs_version%%.*}"
+          package_file="sayo-obs-plugin-linux-x86_64-obs${obs_major}-${version}.zip"
+
+          mkdir -p "package/sayo-obs-plugin/bin/64bit"
+          mkdir -p dist
+          cp build_x86_64/sayo_obs_plugin.so "package/sayo-obs-plugin/bin/64bit/"
+          cp README.md README_ru.md "package/sayo-obs-plugin/"
+
+          ldd "package/sayo-obs-plugin/bin/64bit/sayo_obs_plugin.so"
+          if ldd "package/sayo-obs-plugin/bin/64bit/sayo_obs_plugin.so" | grep -q "not found"; then
+            echo "Missing runtime dependency in packaged plugin"
+            exit 1
+          fi
+
+          (cd package && zip -r "../dist/${package_file}" sayo-obs-plugin)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-linux
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    needs: [release-linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate tag is on default branch
+        run: |
+          git fetch origin master main 2>/dev/null || true
+          ok=false
+          for b in master main; do
+            if git rev-parse --verify "origin/$b" >/dev/null 2>&1; then
+              if git merge-base --is-ancestor "$GITHUB_SHA" "origin/$b"; then
+                ok=true
+                echo "Tag ${GITHUB_REF_NAME} is reachable from origin/$b"
+                break
+              fi
+            fi
+          done
+          if [ "$ok" != "true" ]; then
+            echo "Tag ${GITHUB_REF_NAME} must point to a commit reachable from origin/master or origin/main."
+            exit 1
+          fi
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: release-artifacts/**/*.zip
