@@ -6,7 +6,8 @@ on:
 
 jobs:
   release-linux:
-    runs-on: ubuntu-22.04
+    # OBS 31/32 expects newer FFmpeg than Ubuntu 22.04 ships (needs >= 6.1).
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -16,11 +17,21 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Validate tag is on master
+      - name: Validate tag is on default branch
         run: |
-          git fetch origin master
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/master; then
-            echo "Tag ${GITHUB_REF_NAME} must point to a commit that is on master."
+          git fetch origin master main 2>/dev/null || true
+          ok=false
+          for b in master main; do
+            if git rev-parse --verify "origin/$b" >/dev/null 2>&1; then
+              if git merge-base --is-ancestor "$GITHUB_SHA" "origin/$b"; then
+                ok=true
+                echo "Tag ${GITHUB_REF_NAME} is reachable from origin/$b"
+                break
+              fi
+            fi
+          done
+          if [ "$ok" != "true" ]; then
+            echo "Tag ${GITHUB_REF_NAME} must point to a commit reachable from origin/master or origin/main."
             exit 1
           fi
 
@@ -33,6 +44,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
+            ca-certificates gnupg software-properties-common
+          sudo add-apt-repository -y ppa:obsproject/obs-studio
+          sudo apt-get update
+          sudo apt-get install -y \
             build-essential ca-certificates extra-cmake-modules git ninja-build pkg-config zip \
             protobuf-compiler libprotobuf-dev \
             libgrpc++-dev protobuf-compiler-grpc \
@@ -41,11 +56,18 @@ jobs:
             libx11-dev libgl1-mesa-dev libgles2-mesa-dev libegl1-mesa-dev \
             libxcb-randr0-dev libxcb-shm0-dev libxcb-xinerama0-dev libxcb-composite0-dev \
             libxcomposite-dev libxinerama-dev libxrandr-dev libxss-dev \
+            libxcb1-dev libx11-xcb-dev libxcb-xfixes0-dev \
+            libwayland-dev libglvnd-dev libpci-dev \
+            uthash-dev libmbedtls-dev \
             libpulse-dev libpipewire-0.3-dev libudev-dev libv4l-dev \
             libdrm-dev libva-dev \
             libavcodec-dev libavdevice-dev libavfilter-dev libavformat-dev \
             libavutil-dev libswresample-dev libswscale-dev \
             python3 python3-dev swig libluajit-5.1-dev
+      - name: Verify FFmpeg dev version
+        run: |
+          pkg-config --modversion libavformat
+          pkg-config --atleast-version=6.1 libavformat
 
       - name: Build OBS Studio libobs
         run: |
@@ -115,11 +137,21 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Validate tag is on master
+      - name: Validate tag is on default branch
         run: |
-          git fetch origin master
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/master; then
-            echo "Tag ${GITHUB_REF_NAME} must point to a commit that is on master."
+          git fetch origin master main 2>/dev/null || true
+          ok=false
+          for b in master main; do
+            if git rev-parse --verify "origin/$b" >/dev/null 2>&1; then
+              if git merge-base --is-ancestor "$GITHUB_SHA" "origin/$b"; then
+                ok=true
+                echo "Tag ${GITHUB_REF_NAME} is reachable from origin/$b"
+                break
+              fi
+            fi
+          done
+          if [ "$ok" != "true" ]; then
+            echo "Tag ${GITHUB_REF_NAME} must point to a commit reachable from origin/master or origin/main."
             exit 1
           fi
 
@@ -129,4 +161,5 @@ jobs:
 
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.ref_name }}
           files: release-artifacts/**/*.zip
