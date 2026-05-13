@@ -38,6 +38,7 @@ struct SourceContext {
 	std::mutex grpc_mutex;
 	std::unique_ptr<ASRGrpcClient> grpc_client;
 	std::atomic<bool> streaming_active{false};
+	std::atomic<bool> grpc_handshake_pending{false};
 	std::vector<sayo::ModelDescriptor> available_models;
 	std::string connect_status = "Unknown";
 	std::atomic<bool> connect_in_progress{false};
@@ -743,15 +744,19 @@ static void asr_update(void *data, obs_data_t *settings)
 		ensure_model_and_language_selected(ctx);
 		ctx->grpc_client = std::make_unique<ASRGrpcClient>(ctx->settings.server_address, ctx->settings.server_port);
 		const bool started = ctx->grpc_client->Start(sayo_plugin::ToStreamingConfig(ctx->settings));
-		ctx->streaming_active = started;
-		ctx->connect_status = started ? "Connected" : "Stream start failed";
+		if (!started) {
+			ctx->streaming_active = false;
+			ctx->grpc_handshake_pending = false;
+			ctx->connect_status = "Stream start failed";
+		} else {
+			ctx->streaming_active = false;
+			ctx->grpc_handshake_pending = true;
+			ctx->connect_status = "Waiting for server…";
+		}
 
-		/* Rotate subtitle log on new connection only */
+		/* Rotate subtitle log on new connection; file opens only after session is connected. */
 		if (started) {
 			subtitle_log_close(ctx);
-			if (ctx->subtitle_log_enabled) {
-				subtitle_log_open_if_needed(ctx);
-			}
 		}
 	}
 
@@ -763,6 +768,25 @@ static void asr_update(void *data, obs_data_t *settings)
 			subtitle_log_open_if_needed(ctx);
 		}
 	}
+}
+
+static std::string humanize_connection_status(const std::string &code)
+{
+	if (code == "config_accepted")
+		return "Verifying configuration…";
+	if (code == "allocating_session")
+		return "Allocating session… (may take tens of seconds)";
+	if (code == "actor_reserved")
+		return "Reserving worker…";
+	if (code == "session_opening")
+		return "Connecting to model…";
+	if (code == "connected")
+		return "Connected";
+	if (code == "error")
+		return "Error";
+	if (code.empty())
+		return {};
+	return code;
 }
 
 static bool is_connected(const SourceContext *ctx)
@@ -834,6 +858,81 @@ static void on_connect_ui_update(void *param)
 	delete args;
 }
 
+struct ConnectionUiArgs {
+	obs_weak_source_t *weak_source = nullptr;
+	enum class Kind { Progress, Connected, StreamEnded, ServerError } kind = Kind::Progress;
+	std::string status_text;
+};
+
+static void on_connection_ui(void *param)
+{
+	auto *args = static_cast<ConnectionUiArgs *>(param);
+	if (!args || !args->weak_source) {
+		delete args;
+		return;
+	}
+	obs_source_t *src = obs_weak_source_get_source(args->weak_source);
+	obs_weak_source_release(args->weak_source);
+	args->weak_source = nullptr;
+	if (!src) {
+		delete args;
+		return;
+	}
+	auto *ctx = static_cast<SourceContext *>(obs_obj_get_data(src));
+	if (!ctx || ctx->shutting_down) {
+		obs_source_release(src);
+		delete args;
+		return;
+	}
+
+	switch (args->kind) {
+	case ConnectionUiArgs::Kind::Progress:
+		ctx->connect_status = std::move(args->status_text);
+		break;
+	case ConnectionUiArgs::Kind::Connected:
+		ctx->grpc_handshake_pending = false;
+		ctx->streaming_active = true;
+		ctx->connect_status = "Connected";
+		if (ctx->subtitle_log_enabled) {
+			subtitle_log_open_if_needed(ctx);
+		}
+		break;
+	case ConnectionUiArgs::Kind::StreamEnded:
+	case ConnectionUiArgs::Kind::ServerError: {
+		std::lock_guard<std::mutex> lock(ctx->grpc_mutex);
+		if (ctx->grpc_client) {
+			ctx->grpc_client->Stop();
+			if (args->kind == ConnectionUiArgs::Kind::ServerError) {
+				ctx->grpc_client.reset();
+			}
+		}
+	}
+		ctx->grpc_handshake_pending = false;
+		ctx->streaming_active = false;
+		ctx->connect_status = std::move(args->status_text);
+		break;
+	}
+
+	queue_text_refresh(ctx);
+	obs_source_update_properties(src);
+	obs_source_release(src);
+	delete args;
+}
+
+static void queue_connection_ui(SourceContext *ctx, ConnectionUiArgs *args)
+{
+	if (!ctx || !args || ctx->shutting_down || !ctx->source) {
+		delete args;
+		return;
+	}
+	args->weak_source = obs_source_get_weak_source(ctx->source);
+	if (!args->weak_source) {
+		delete args;
+		return;
+	}
+	obs_queue_task(OBS_TASK_UI, on_connection_ui, args, false);
+}
+
 static bool on_disconnect_clicked(obs_properties_t *, obs_property_t *, void *data)
 {
 	auto *ctx = static_cast<SourceContext *>(data);
@@ -848,6 +947,7 @@ static bool on_disconnect_clicked(obs_properties_t *, obs_property_t *, void *da
 		}
 	}
 	ctx->streaming_active = false;
+	ctx->grpc_handshake_pending = false;
 	subtitle_log_close(ctx);
 	ctx->connect_pending_apply = false;
 	{
@@ -1061,29 +1161,73 @@ static void asr_tick(void *data, float)
 		return;
 	}
 
-	RecognitionResult result;
-	bool has_item = false;
+	std::vector<RecognitionResult> batch;
 	{
 		std::lock_guard<std::mutex> lock(ctx->grpc_mutex);
-		if (ctx->grpc_client && ctx->grpc_client->IsRunning()) {
+		if (ctx->grpc_client) {
 			std::lock_guard<std::mutex> queue_lock(ctx->grpc_client->queue_mutex);
-			if (!ctx->grpc_client->results_queue.empty()) {
-				result = ctx->grpc_client->results_queue.front();
+			while (!ctx->grpc_client->results_queue.empty()) {
+				batch.push_back(std::move(ctx->grpc_client->results_queue.front()));
 				ctx->grpc_client->results_queue.pop();
-				has_item = true;
 			}
 		}
 	}
 
-	if (has_item && !result.transcript.empty()) {
-		{
-			std::lock_guard<std::mutex> sub(ctx->subtitle_mutex);
-			ctx->subtitles_buffer.addText(result.transcript, result.is_final);
-			ctx->asr_received_content = true;
-			ctx->pending_display_text = get_display_text_locked(ctx);
+	for (RecognitionResult &result : batch) {
+		if (!result.connection_status.empty()) {
+			const std::string &cs = result.connection_status;
+			if (cs == "connected") {
+				auto *args = new ConnectionUiArgs{};
+				args->kind = ConnectionUiArgs::Kind::Connected;
+				queue_connection_ui(ctx, args);
+			} else if (cs == "error") {
+				ctx->grpc_handshake_pending = false;
+				std::string msg = humanize_connection_status(cs);
+				if (!result.connection_detail.empty()) {
+					msg += ": ";
+					msg += result.connection_detail;
+				}
+				auto *args = new ConnectionUiArgs{};
+				args->kind = ConnectionUiArgs::Kind::ServerError;
+				args->status_text = std::move(msg);
+				queue_connection_ui(ctx, args);
+			} else {
+				auto *args = new ConnectionUiArgs{};
+				args->kind = ConnectionUiArgs::Kind::Progress;
+				args->status_text = humanize_connection_status(cs);
+				if (args->status_text.empty()) {
+					args->status_text = cs;
+				}
+				queue_connection_ui(ctx, args);
+			}
 		}
-		subtitle_log_append_interim(ctx, result.transcript);
-		queue_text_refresh(ctx);
+
+		if (!result.transcript.empty()) {
+			{
+				std::lock_guard<std::mutex> sub(ctx->subtitle_mutex);
+				ctx->subtitles_buffer.addText(result.transcript, result.is_final);
+				ctx->asr_received_content = true;
+				ctx->pending_display_text = get_display_text_locked(ctx);
+			}
+			subtitle_log_append_interim(ctx, result.transcript);
+			queue_text_refresh(ctx);
+		}
+	}
+
+	bool need_stream_lost = false;
+	{
+		std::lock_guard<std::mutex> lock(ctx->grpc_mutex);
+		if (ctx->grpc_handshake_pending.load() && ctx->grpc_client && !ctx->grpc_client->IsRunning() &&
+		    !ctx->streaming_active.load()) {
+			ctx->grpc_handshake_pending = false;
+			need_stream_lost = true;
+		}
+	}
+	if (need_stream_lost) {
+		auto *args = new ConnectionUiArgs{};
+		args->kind = ConnectionUiArgs::Kind::StreamEnded;
+		args->status_text = "Connection closed before session was ready";
+		queue_connection_ui(ctx, args);
 	}
 }
 

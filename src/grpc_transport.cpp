@@ -156,9 +156,41 @@ void ASRGrpcClient::ReceiverLoop()
 		item.is_final = response.is_final();
 		item.confidence = response.confidence();
 
-		if (!item.transcript.empty()) {
+		const auto &meta = response.metadata();
+		if (const auto it = meta.find("connection_status"); it != meta.end()) {
+			item.connection_status = it->second;
+		}
+		if (const auto it = meta.find("detail"); it != meta.end()) {
+			item.connection_detail = it->second;
+		}
+
+		if (!item.connection_status.empty()) {
+			std::string dbg = "connection_status=" + item.connection_status;
+			if (const auto a = meta.find("actor_name"); a != meta.end()) {
+				dbg += " actor_name=";
+				dbg += a->second;
+			}
+			if (const auto s = meta.find("session_id"); s != meta.end()) {
+				dbg += " session_id=";
+				dbg += s->second;
+			}
+			obs_log(LOG_DEBUG, "StreamingRecognize: %s", dbg.c_str());
+		}
+
+		const bool has_transcript = !item.transcript.empty();
+		const bool has_lifecycle = !item.connection_status.empty();
+		if (has_transcript || has_lifecycle) {
 			std::lock_guard<std::mutex> lock(queue_mutex);
 			results_queue.push(std::move(item));
 		}
+
+		if (item.connection_status == "error") {
+			running_ = false;
+			audio_queue_cv_.notify_all();
+			break;
+		}
 	}
+
+	running_ = false;
+	audio_queue_cv_.notify_all();
 }

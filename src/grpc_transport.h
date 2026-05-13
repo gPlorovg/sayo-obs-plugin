@@ -17,6 +17,9 @@ struct RecognitionResult {
 	std::string transcript;
 	bool is_final = false;
 	float confidence = 0.0f;
+	/* From response.metadata["connection_status"] during session handshake (and "error"). */
+	std::string connection_status;
+	std::string connection_detail;
 };
 
 class ASRGrpcClient {
